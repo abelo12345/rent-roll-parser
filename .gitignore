@@ -1,0 +1,8 @@
+__pycache__/
+*.pyc
+DATA/
+workspace/
+.streamlit/secrets.toml
+.claude/
+nul
+*.xlsx
