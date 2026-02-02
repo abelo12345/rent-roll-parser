@@ -22,6 +22,49 @@ def _build_floorplan_summary(df: pd.DataFrame) -> list[dict]:
     return sorted(summaries, key=lambda x: (x["avg_sqft"] or 0))
 
 
+def _repair_truncated_json(text: str) -> str:
+    """Attempt to repair JSON that was truncated mid-output.
+
+    Strips the last incomplete entry back to the previous complete one,
+    then closes any open braces.
+    """
+    # Remove any trailing partial key-value pair (after the last complete entry)
+    # Look for the last complete "}: ," or "}" pattern
+    last_complete = text.rfind("}")
+    if last_complete > 0:
+        text = text[: last_complete + 1]
+
+    # Remove trailing comma if present
+    text = text.rstrip().rstrip(",")
+
+    # Count unclosed braces and close them
+    depth = 0
+    for ch in text:
+        if ch == "{":
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+    text += "}" * depth
+
+    return text
+
+
+def _fallback_unit_type(avg_sqft: float | None) -> str:
+    """Assign unit type based on SF when AI mapping is missing."""
+    if avg_sqft is None:
+        return "Unknown"
+    if avg_sqft < 600:
+        return "Studio"
+    elif avg_sqft < 950:
+        return "1x1"
+    elif avg_sqft < 1250:
+        return "2x2"
+    elif avg_sqft < 1600:
+        return "2x2"
+    else:
+        return "3x2"
+
+
 def propose_mapping(client, df: pd.DataFrame) -> dict[str, dict]:
     """Ask Claude to propose a floorplan → unit type mapping.
 
@@ -71,7 +114,7 @@ IMPORTANT GUIDELINES:
 
     response = client.messages.create(
         model="claude-sonnet-4-20250514",
-        max_tokens=2048,
+        max_tokens=4096,
         tools=[{"type": "web_search_20250305", "name": "web_search", "max_uses": 3}],
         messages=[{"role": "user", "content": prompt}],
     )
@@ -83,6 +126,7 @@ IMPORTANT GUIDELINES:
     if match:
         text = text[match.start():]
         depth = 0
+        end_found = False
         for i, ch in enumerate(text):
             if ch == "{":
                 depth += 1
@@ -90,8 +134,27 @@ IMPORTANT GUIDELINES:
                 depth -= 1
                 if depth == 0:
                     text = text[: i + 1]
+                    end_found = True
                     break
-    return json.loads(text)
+        # If response was truncated (no balanced closing brace), repair it
+        if not end_found:
+            text = _repair_truncated_json(text)
+
+    # Fix common AI JSON issues: trailing commas before } or ]
+    text = re.sub(r",\s*([}\]])", r"\1", text)
+
+    result = json.loads(text)
+
+    # Fill missing floorplans with SF-based fallback
+    for fp_summary in summary:
+        fp = fp_summary["floorplan"]
+        if fp not in result:
+            result[fp] = {
+                "unit_type": _fallback_unit_type(fp_summary.get("avg_sqft")),
+                "reno": False,
+            }
+
+    return result
 
 
 def mapping_to_df(mapping: dict[str, dict]) -> pd.DataFrame:

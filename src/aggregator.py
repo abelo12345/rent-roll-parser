@@ -31,14 +31,16 @@ def deduplicate(df: pd.DataFrame) -> pd.DataFrame:
 def classify_occupancy(status: str) -> str:
     """Classify status into Occupied or Vacant for summary purposes.
 
-    Per user rules:
-    - Occupied, Occupied-NTV, Pending Renewal → Occupied
-    - Applicant → Occupied (pre-leased, counts as occupied)
-    - Vacant, Model → Vacant
+    Permissive: anything not clearly vacant is treated as occupied.
+    This is safer because phantom vacancy (misclassifying occupied as vacant)
+    is worse than the reverse.
     """
-    if status in ("Occupied", "Occupied-NTV", "Pending Renewal", "Applicant"):
-        return "Occupied"
-    return "Vacant"
+    if not status:
+        return "Vacant"
+    lower = status.lower().strip()
+    if any(v in lower for v in ("vacant", "model")):
+        return "Vacant"
+    return "Occupied"
 
 
 def apply_mapping(df: pd.DataFrame, mapping: dict[str, dict]) -> pd.DataFrame:

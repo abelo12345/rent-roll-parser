@@ -137,6 +137,9 @@ PROPERTY DETAILS:
                 if depth == 0:
                     text = text[: i + 1]
                     break
+    # Fix common AI JSON issues: trailing commas before } or ]
+    text = re.sub(r",\s*([}\]])", r"\1", text)
+
     return json.loads(text)
 
 

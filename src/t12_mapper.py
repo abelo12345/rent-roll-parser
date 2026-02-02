@@ -59,6 +59,9 @@ BELOW_THE_LINE = [
     "Asset Management Fee",
     "Capital Reserve Below the Line",
     "Earthquake Ins Below the Line",
+    "Debt Service",
+    "Depreciation & Amortization",
+    "Other Ownership Expenses",
 ]
 
 ALL_CATEGORIES = (
@@ -70,6 +73,10 @@ ALL_CATEGORIES = (
 )
 
 _CATEGORY_SET = set(ALL_CATEGORIES)
+
+_REVENUE_SET = set(REVENUE_WATERFALL + OTHER_INCOME)
+_EXPENSE_SET = set(CONTROLLABLE_EXPENSES + UNCONTROLLABLE_EXPENSES)
+_BTL_SET = set(BELOW_THE_LINE)
 
 
 def _format_gl_items(leaf_items: list[T12LineItem]) -> str:
@@ -89,8 +96,12 @@ def _format_gl_items(leaf_items: list[T12LineItem]) -> str:
     return "\n".join(lines)
 
 
-def propose_t12_mapping(client, leaf_items: list[T12LineItem]) -> list[dict]:
+def propose_t12_mapping(client, leaf_items: list[T12LineItem], grand_totals: dict | None = None) -> list[dict]:
     """Ask Claude to map each leaf GL item to a standard underwriting category.
+
+    Args:
+        grand_totals: dict from T12ParseResult.grand_totals, used for
+            position-based validation (revenue vs expense vs BTL).
 
     Returns list of dicts with keys:
         source_row, gl_code, gl_description, category, confidence, notes
@@ -150,8 +161,11 @@ UNCONTROLLABLE EXPENSES:
 BELOW THE LINE:
 - Capital Reserve Above the Line: Capital reserves treated as operating expense
 - Asset Management Fee: Asset management fees
-- Capital Reserve Below the Line: Capital reserves below the line
+- Capital Reserve Below the Line: Capital reserves, capital expenditures, property improvements (building, HVAC, plumbing, mechanical, landscaping, fencing, flooring, pool, etc.)
 - Earthquake Ins Below the Line: Earthquake insurance
+- Debt Service: Mortgage payments, 1st mortgage, interest expense, loan interest, other debt service
+- Depreciation & Amortization: Depreciation (building, furniture, equipment), amortization (loan fees, leasing costs, other)
+- Other Ownership Expenses: Appraisal costs, audit/tax costs, bank fees, environmental, legal costs (ownership level), leasing costs (ownership level), permits/licenses, state income tax, insurance claims/expense (ownership level), other ownership expense
 
 IMPORTANT RULES:
 1. Every GL line MUST be mapped to exactly one category
@@ -192,6 +206,9 @@ Return ONLY valid JSON (no markdown fences) as a list:
                     text = text[: i + 1]
                     break
 
+    # Fix common AI JSON issues: trailing commas before } or ]
+    text = re.sub(r",\s*([}\]])", r"\1", text)
+
     ai_mapping = json.loads(text)
 
     # Build lookup from source_row
@@ -224,6 +241,35 @@ Return ONLY valid JSON (no markdown fences) as a list:
                 "confidence": "low",
                 "notes": "Not mapped by AI; defaulted to Miscellaneous Income",
             })
+
+    # Position-based validation: enforce that items in the revenue section
+    # map to revenue categories, expense section to expense, and BTL to BTL.
+    if grand_totals:
+        income_row = grand_totals["total_income"].source_row if grand_totals.get("total_income") else None
+        opex_row = grand_totals["total_opex"].source_row if grand_totals.get("total_opex") else None
+        noi_row = grand_totals["noi"].source_row if grand_totals.get("noi") else None
+
+        for m in result:
+            cat = m["category"]
+            row = m["source_row"]
+
+            if income_row and row < income_row and cat not in _REVENUE_SET:
+                old = cat
+                m["category"] = "Miscellaneous Income"
+                m["confidence"] = "low"
+                m["notes"] = f"Corrected: '{old}' is not a revenue category (item is in revenue section)"
+
+            elif income_row and opex_row and income_row < row < opex_row and cat not in _EXPENSE_SET:
+                old = cat
+                m["category"] = "Administrative"
+                m["confidence"] = "low"
+                m["notes"] = f"Corrected: '{old}' is not an expense category (item is in expense section)"
+
+            elif noi_row and row > noi_row and cat not in _BTL_SET:
+                old = cat
+                m["category"] = "Capital Reserve Below the Line"
+                m["confidence"] = "low"
+                m["notes"] = f"Corrected: '{old}' is not a BTL category (item is below NOI)"
 
     # Sort by source_row
     result.sort(key=lambda m: m["source_row"])

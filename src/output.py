@@ -80,6 +80,17 @@ STD_COLUMNS_BASE = [
     ("P", "Total Billing"),
 ]
 
+# Build field → column letter mapping from STD_COLUMNS_BASE
+STD_COL_MAP = {header: letter for letter, header in STD_COLUMNS_BASE}
+_COL_DISPLAY_TYPE = STD_COL_MAP["Display Type"]
+_COL_SQFT = STD_COL_MAP["SQFT"]
+_COL_STATUS = STD_COL_MAP["Status"]
+_COL_OCCUPANCY = STD_COL_MAP["Occupancy"]
+_COL_MOVE_IN = STD_COL_MAP["Move-In"]
+_COL_LEASE_END = STD_COL_MAP["Lease End"]
+_COL_MARKET_RENT = STD_COL_MAP["Market Rent"]
+_COL_LEASE_RENT = STD_COL_MAP["Lease Rent"]
+
 # Default layout when no charge columns (backward compatible)
 STD_COLUMNS = STD_COLUMNS_BASE + [("Q", "Dedup Flag"), ("R", "Source Row")]
 
@@ -463,7 +474,7 @@ def _write_section_formulas(ws, row, col, type_name, sdef, std_last_row, total_r
                             first_data_row, data_rows, dedup_col="Q"):
     """Write formulas for one section (6 or 4 columns) for a specific unit type row."""
     # Common criteria: display type match + not deduped
-    type_crit = f'Standardized!$D$2:$D${std_last_row},"{type_name}"'
+    type_crit = f'Standardized!${_COL_DISPLAY_TYPE}$2:${_COL_DISPLAY_TYPE}${std_last_row},"{type_name}"'
     dedup_crit = f'Standardized!${dedup_col}$2:${dedup_col}${std_last_row},""'
 
     # Additional criteria for section type
@@ -474,28 +485,28 @@ def _write_section_formulas(ws, row, col, type_name, sdef, std_last_row, total_r
         rent_col = None
     elif sdef["label"] == "Occupied Units":
         # Occupied units: Occupancy = "Occupied"
-        occ_crit = f'Standardized!$H$2:$H${std_last_row},"Occupied"'
+        occ_crit = f'Standardized!${_COL_OCCUPANCY}$2:${_COL_OCCUPANCY}${std_last_row},"Occupied"'
         count_criteria = f"{type_crit},{dedup_crit},{occ_crit}"
         sf_criteria = count_criteria
-        rent_col = "$O"  # Lease Rent
+        rent_col = f"${_COL_LEASE_RENT}"
     elif sdef["label"] == "Market Rents":
         # All units of this type
         count_criteria = f"{type_crit},{dedup_crit}"
         sf_criteria = count_criteria
-        rent_col = "$N"  # Market Rent
+        rent_col = f"${_COL_MARKET_RENT}"
     else:
         # Date-filtered section: occupied units with move-in date within range
         df = sdef["date_filter"]
         # Move-In ($J) >= start AND Move-In ($J) <= end
-        occ_crit = f'Standardized!$H$2:$H${std_last_row},"Occupied"'
-        movein_gte = f'Standardized!$J$2:$J${std_last_row},">=" & DATE({df["start"].year},{df["start"].month},{df["start"].day})'
-        movein_lte = f'Standardized!$J$2:$J${std_last_row},"<=" & DATE({df["end"].year},{df["end"].month},{df["end"].day})'
+        occ_crit = f'Standardized!${_COL_OCCUPANCY}$2:${_COL_OCCUPANCY}${std_last_row},"Occupied"'
+        movein_gte = f'Standardized!${_COL_MOVE_IN}$2:${_COL_MOVE_IN}${std_last_row},">=" & DATE({df["start"].year},{df["start"].month},{df["start"].day})'
+        movein_lte = f'Standardized!${_COL_MOVE_IN}$2:${_COL_MOVE_IN}${std_last_row},"<=" & DATE({df["end"].year},{df["end"].month},{df["end"].day})'
         count_criteria = f"{type_crit},{dedup_crit},{occ_crit},{movein_gte},{movein_lte}"
         sf_criteria = count_criteria
-        rent_col = "$O"  # Lease Rent
+        rent_col = f"${_COL_LEASE_RENT}"
 
-    sf_range = f"Standardized!$F$2:$F${std_last_row}"
-    count_range = f"Standardized!$D$2:$D${std_last_row}"
+    sf_range = f"Standardized!${_COL_SQFT}$2:${_COL_SQFT}${std_last_row}"
+    count_range = f"Standardized!${_COL_DISPLAY_TYPE}$2:${_COL_DISPLAY_TYPE}${std_last_row}"
 
     # Units = COUNTIFS(...)
     units_formula = f"=COUNTIFS({count_criteria})"
@@ -563,28 +574,28 @@ def _write_total_row_formulas(ws, total_row, col, sdef, data_row_numbers, std_la
         # Build sum of ($/unit * units) for each row, then divide by total units
         # Simpler: reference Standardized directly
         if sdef["label"] == "Occupied Units":
-            rent_col = "$O"
-            occ_crit = f'Standardized!$H$2:$H${std_last_row},"Occupied"'
+            rent_col = f"${_COL_LEASE_RENT}"
+            occ_crit = f'Standardized!${_COL_OCCUPANCY}$2:${_COL_OCCUPANCY}${std_last_row},"Occupied"'
             dedup_crit = f'Standardized!${dedup_col}$2:${dedup_col}${std_last_row},""'
             rent_range = f"Standardized!{rent_col}$2:{rent_col}${std_last_row}"
             ws.cell(
                 row=total_row, column=col + 4,
                 value=f"=IFERROR(SUMIFS({rent_range},{occ_crit},{dedup_crit})/{units_col}{total_row},0)"
             ).font = BOLD_FONT
-            sf_range = f"Standardized!$F$2:$F${std_last_row}"
+            sf_range = f"Standardized!${_COL_SQFT}$2:${_COL_SQFT}${std_last_row}"
             ws.cell(
                 row=total_row, column=col + 5,
                 value=f"=IFERROR(SUMIFS({rent_range},{occ_crit},{dedup_crit})/SUMIFS({sf_range},{occ_crit},{dedup_crit}),0)"
             ).font = BOLD_FONT
         elif sdef["label"] == "Market Rents":
-            rent_col = "$N"
+            rent_col = f"${_COL_MARKET_RENT}"
             dedup_crit = f'Standardized!${dedup_col}$2:${dedup_col}${std_last_row},""'
             rent_range = f"Standardized!{rent_col}$2:{rent_col}${std_last_row}"
             ws.cell(
                 row=total_row, column=col + 4,
                 value=f"=IFERROR(SUMIFS({rent_range},{dedup_crit})/{units_col}{total_row},0)"
             ).font = BOLD_FONT
-            sf_range = f"Standardized!$F$2:$F${std_last_row}"
+            sf_range = f"Standardized!${_COL_SQFT}$2:${_COL_SQFT}${std_last_row}"
             ws.cell(
                 row=total_row, column=col + 5,
                 value=f"=IFERROR(SUMIFS({rent_range},{dedup_crit})/SUMIFS({sf_range},{dedup_crit}),0)"
@@ -592,14 +603,14 @@ def _write_total_row_formulas(ws, total_row, col, sdef, data_row_numbers, std_la
         else:
             # Date-filtered: sum of rents / count for occupied in move-in date range
             df = sdef["date_filter"]
-            rent_col = "$O"
-            occ_crit = f'Standardized!$H$2:$H${std_last_row},"Occupied"'
+            rent_col = f"${_COL_LEASE_RENT}"
+            occ_crit = f'Standardized!${_COL_OCCUPANCY}$2:${_COL_OCCUPANCY}${std_last_row},"Occupied"'
             dedup_crit = f'Standardized!${dedup_col}$2:${dedup_col}${std_last_row},""'
-            movein_gte = f'Standardized!$J$2:$J${std_last_row},">=" & DATE({df["start"].year},{df["start"].month},{df["start"].day})'
-            movein_lte = f'Standardized!$J$2:$J${std_last_row},"<=" & DATE({df["end"].year},{df["end"].month},{df["end"].day})'
+            movein_gte = f'Standardized!${_COL_MOVE_IN}$2:${_COL_MOVE_IN}${std_last_row},">=" & DATE({df["start"].year},{df["start"].month},{df["start"].day})'
+            movein_lte = f'Standardized!${_COL_MOVE_IN}$2:${_COL_MOVE_IN}${std_last_row},"<=" & DATE({df["end"].year},{df["end"].month},{df["end"].day})'
             all_crit = f"{occ_crit},{dedup_crit},{movein_gte},{movein_lte}"
             rent_range = f"Standardized!{rent_col}$2:{rent_col}${std_last_row}"
-            sf_range = f"Standardized!$F$2:$F${std_last_row}"
+            sf_range = f"Standardized!${_COL_SQFT}$2:${_COL_SQFT}${std_last_row}"
             ws.cell(
                 row=total_row, column=col + 4,
                 value=f"=IFERROR(SUMIFS({rent_range},{all_crit})/{units_col}{total_row},0)"
@@ -710,7 +721,7 @@ def write_checks_sheet(wb: openpyxl.Workbook, agg_data: dict, summary_total_row:
         ws.cell(row=3, column=i + 1, value=h).font = BOLD_FONT
 
     dc = dedup_col  # shorthand
-    occ_range = f'Standardized!$H$2:$H${std_last_row}'
+    occ_range = f'Standardized!${_COL_OCCUPANCY}$2:${_COL_OCCUPANCY}${std_last_row}'
     dedup_range = f'Standardized!${dc}$2:${dc}${std_last_row}'
 
     r = 4  # current row tracker
@@ -725,14 +736,14 @@ def write_checks_sheet(wb: openpyxl.Workbook, agg_data: dict, summary_total_row:
     # Check 2: Total SF
     ws.cell(row=r, column=1, value="Total SF (Summary vs Standardized)")
     ws.cell(row=r, column=2, value=f"=Summary!E{summary_total_row}")
-    ws.cell(row=r, column=3, value=f'=SUMIFS(Standardized!$F$2:$F${std_last_row},{dedup_range},"")')
+    ws.cell(row=r, column=3, value=f'=SUMIFS(Standardized!${_COL_SQFT}$2:${_COL_SQFT}${std_last_row},{dedup_range},"")')
     ws.cell(row=r, column=4, value=f"=B{r}=C{r}")
     r += 1
 
     # Check 3: Total occupied lease rent
     ws.cell(row=r, column=1, value="Total Occupied Lease Rent (Summary vs Standardized)")
     ws.cell(row=r, column=2, value=f"=Summary!K{summary_total_row}*Summary!G{summary_total_row}")
-    ws.cell(row=r, column=3, value=f'=SUMIFS(Standardized!$O$2:$O${std_last_row},{occ_range},"Occupied",{dedup_range},"")')
+    ws.cell(row=r, column=3, value=f'=SUMIFS(Standardized!${_COL_LEASE_RENT}$2:${_COL_LEASE_RENT}${std_last_row},{occ_range},"Occupied",{dedup_range},"")')
     ws.cell(row=r, column=4, value=f"=ROUND(B{r},0)=ROUND(C{r},0)")
     r += 1
 
@@ -809,14 +820,14 @@ def write_loss_to_lease_sheet(wb: openpyxl.Workbook, agg_data: dict, std_last_ro
 
     # Criteria building helpers
     def type_crit(t):
-        return f'Standardized!$D$2:$D${std_last_row},"{t}"'
+        return f'Standardized!${_COL_DISPLAY_TYPE}$2:${_COL_DISPLAY_TYPE}${std_last_row},"{t}"'
 
     def base_crit(t):
         return f'{type_crit(t)},Standardized!${dc}$2:${dc}${std_last_row},""'
 
-    occ_crit = f'Standardized!$H$2:$H${std_last_row},"Occupied"'
-    market_range = f"Standardized!$N$2:$N${std_last_row}"
-    lease_range = f"Standardized!$O$2:$O${std_last_row}"
+    occ_crit = f'Standardized!${_COL_OCCUPANCY}$2:${_COL_OCCUPANCY}${std_last_row},"Occupied"'
+    market_range = f"Standardized!${_COL_MARKET_RENT}$2:${_COL_MARKET_RENT}${std_last_row}"
+    lease_range = f"Standardized!${_COL_LEASE_RENT}$2:${_COL_LEASE_RENT}${std_last_row}"
 
     for i, utype in enumerate(unit_type_order):
         r = 4 + i
@@ -941,7 +952,7 @@ def write_other_income_sheet(wb: openpyxl.Workbook, agg_data: dict, std_last_row
     # Data rows
     for i, utype in enumerate(unit_type_order):
         r = 4 + i
-        type_crit = f'Standardized!$D$2:$D${std_last_row},"{utype}"'
+        type_crit = f'Standardized!${_COL_DISPLAY_TYPE}$2:${_COL_DISPLAY_TYPE}${std_last_row},"{utype}"'
         base_crit = f'{type_crit},Standardized!${dc}$2:${dc}${std_last_row},""'
 
         ws.cell(row=r, column=1, value=utype).font = DATA_FONT
@@ -1032,10 +1043,10 @@ def write_lease_expirations_sheet(wb: openpyxl.Workbook, agg_data: dict, std_las
         ws.cell(row=3, column=i + 1, value=h).font = HEADER_FONT
 
     # Build 18 monthly buckets starting from the as-of date's month
-    lease_end_range = f"Standardized!$M$2:$M${std_last_row}"
-    rent_range = f"Standardized!$O$2:$O${std_last_row}"
+    lease_end_range = f"Standardized!${_COL_LEASE_END}$2:${_COL_LEASE_END}${std_last_row}"
+    rent_range = f"Standardized!${_COL_LEASE_RENT}$2:${_COL_LEASE_RENT}${std_last_row}"
     dedup_crit = f'Standardized!${dc}$2:${dc}${std_last_row},""'
-    occ_crit = f'Standardized!$H$2:$H${std_last_row},"Occupied"'
+    occ_crit = f'Standardized!${_COL_OCCUPANCY}$2:${_COL_OCCUPANCY}${std_last_row},"Occupied"'
 
     year = as_of_date.year
     month = as_of_date.month
@@ -1078,7 +1089,7 @@ def write_lease_expirations_sheet(wb: openpyxl.Workbook, agg_data: dict, std_las
     # Checks section
     chk_r = total_r + 2
     ws.cell(row=chk_r, column=1, value="Checks").font = BOLD_FONT
-    occ_range = f"Standardized!$H$2:$H${std_last_row}"
+    occ_range = f"Standardized!${_COL_OCCUPANCY}$2:${_COL_OCCUPANCY}${std_last_row}"
     ws.cell(row=chk_r + 1, column=1, value="Total Occupied")
     ws.cell(row=chk_r + 1, column=2,
             value=f'=COUNTIFS({occ_range},"Occupied",{dedup_crit})')
@@ -1115,14 +1126,14 @@ def write_occupancy_sheet(wb: openpyxl.Workbook, agg_data: dict, std_last_row: i
     for i, h in enumerate(headers):
         ws.cell(row=3, column=i + 1, value=h).font = HEADER_FONT
 
-    status_range = f"Standardized!$G$2:$G${std_last_row}"
-    market_range = f"Standardized!$N$2:$N${std_last_row}"
-    lease_range = f"Standardized!$O$2:$O${std_last_row}"
-    occ_range = f"Standardized!$H$2:$H${std_last_row}"
+    status_range = f"Standardized!${_COL_STATUS}$2:${_COL_STATUS}${std_last_row}"
+    market_range = f"Standardized!${_COL_MARKET_RENT}$2:${_COL_MARKET_RENT}${std_last_row}"
+    lease_range = f"Standardized!${_COL_LEASE_RENT}$2:${_COL_LEASE_RENT}${std_last_row}"
+    occ_range = f"Standardized!${_COL_OCCUPANCY}$2:${_COL_OCCUPANCY}${std_last_row}"
 
     for i, utype in enumerate(unit_type_order):
         r = 4 + i
-        type_crit = f'Standardized!$D$2:$D${std_last_row},"{utype}"'
+        type_crit = f'Standardized!${_COL_DISPLAY_TYPE}$2:${_COL_DISPLAY_TYPE}${std_last_row},"{utype}"'
         base_crit = f'{type_crit},Standardized!${dc}$2:${dc}${std_last_row},""'
 
         ws.cell(row=r, column=1, value=utype).font = DATA_FONT

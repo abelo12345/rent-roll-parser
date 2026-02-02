@@ -11,17 +11,13 @@ import pandas as pd
 # Canonical status values
 VALID_STATUSES = {"Occupied", "Vacant", "Applicant", "Occupied-NTV", "Pending Renewal", "Model"}
 
-STATUS_ALIASES = {
+# Minimal hardcoded fallback for the most universal status values.
+# The AI-provided status_mapping (from identify_columns) handles all format-specific
+# abbreviations and PMS codes dynamically.
+_BASIC_STATUS_ALIASES = {
     "occupied": "Occupied",
     "vacant": "Vacant",
     "applicant": "Applicant",
-    "occupied-ntv": "Occupied-NTV",
-    "occupied ntv": "Occupied-NTV",
-    "notice": "Occupied-NTV",
-    "ntv": "Occupied-NTV",
-    "pending renewal": "Pending Renewal",
-    "pending": "Pending Renewal",
-    "renewal": "Pending Renewal",
     "model": "Model",
 }
 
@@ -92,13 +88,40 @@ def _rows_to_text(ws, max_rows: int = 50) -> str:
     return "\n".join(lines)
 
 
+def _rows_to_text_range(ws, start_row: int, end_row: int) -> str:
+    """Convert a range of rows to text for the LLM."""
+    lines = []
+    for row_idx, row in enumerate(
+        ws.iter_rows(min_row=start_row, max_row=end_row, values_only=False),
+        start=start_row,
+    ):
+        parts = []
+        for cell in row:
+            col_letter = _col_letter(cell.column)
+            val = cell.value
+            if val is None:
+                continue
+            parts.append(f"{col_letter}{row_idx}={repr(val)}")
+        if parts:
+            lines.append(f"Row {row_idx}: " + " | ".join(parts))
+    return "\n".join(lines)
+
+
 def identify_columns(client, ws) -> dict:
     """Use Claude to identify the column mapping and data boundaries in the rent roll."""
     preview = _rows_to_text(ws, max_rows=50)
 
+    # Also include the last 20 rows so the AI can detect footer/summary patterns
+    tail_start = max(51, ws.max_row - 19)
+    tail_preview = _rows_to_text_range(ws, tail_start, ws.max_row)
+
     prompt = f"""You are analyzing a multifamily rent roll spreadsheet. Below are the first 50 rows with cell references and values.
 
 {preview}
+
+--- LAST {ws.max_row - tail_start + 1} ROWS (rows {tail_start}-{ws.max_row}) ---
+
+{tail_preview}
 
 Identify the following and return ONLY valid JSON (no markdown fences, no explanation):
 {{
@@ -125,7 +148,16 @@ Identify the following and return ONLY valid JSON (no markdown fences, no explan
   "format": "<single_row or multi_row>",
   "status_column_exists": <true or false>,
   "multi_row_config": <null or object>,
-  "section_dividers": <[] or list of objects>
+  "section_dividers": <[] or list of objects>,
+  "status_mapping": {{
+    "<raw_status_value>": "<canonical_status>",
+    ...
+  }},
+  "footer_patterns": ["<lowercase text pattern>", ...],
+  "section_keywords": {{
+    "applicants": ["<keyword>", ...],
+    "current": ["<keyword>", ...]
+  }}
 }}
 
 FORMAT DETECTION:
@@ -149,6 +181,26 @@ SECTION DIVIDERS:
   [{{"row": <row number>, "text": "<section header text>", "section_type": "<current or applicants>"}}]
 - "section_type" should be "current" for sections containing current/active residents and "applicants" for sections containing future/applicant/pre-lease residents.
 - If there are no section dividers, return an empty list [].
+
+STATUS MAPPING:
+- Look at the status/lease-status column values visible in the preview rows.
+- Map every unique raw status value to one of these canonical statuses:
+  "Occupied", "Vacant", "Applicant", "Occupied-NTV", "Pending Renewal", "Model"
+- Include ALL status values you see, even abbreviated PMS codes (e.g., "OC" → "Occupied", "VR" → "Vacant", "NU" → "Occupied-NTV")
+- Common PMS abbreviations: OC/Current/Leased = Occupied, VR/VU/VN = Vacant, NR/NU/NN/NTV/Notice = Occupied-NTV, AP/Pre-leased = Applicant, PR/Renewed = Pending Renewal, MO = Model
+- Return as: {{"OC": "Occupied", "VR": "Vacant", ...}}
+- If no status column exists (status_column_exists is false), return {{}}
+
+FOOTER PATTERNS:
+- Identify any text patterns visible in the preview that mark summary, footer, or legend rows
+  (e.g., "Summary Groups", "Total Units", "Status Legend", "Grand Total", "Charge Summary")
+- Return as a list of lowercase strings that can be used for substring matching
+- If none visible, return []
+
+SECTION KEYWORDS:
+- If you see section header rows, also return generic keywords to help detect similar sections beyond the 50-row preview
+- Format: {{"applicants": ["future residents", ...], "current": ["current residents", ...]}}
+- If no section headers are visible, return {{}}
 
 TWO-ROW HEADERS:
 - If the header spans two rows (e.g. row 5 and row 6), use the FIRST header row as "header_row" and make sure "data_start_row" points to the first actual data row after both header rows.
@@ -189,20 +241,26 @@ Important:
     return json.loads(text)
 
 
-def normalize_status(raw: str) -> str:
-    """Normalize a status string to one of the canonical values."""
+def normalize_status(raw: str, ai_status_map: dict[str, str] | None = None) -> str:
+    """Normalize a status string using the AI-provided mapping, with minimal fallback."""
     if raw is None:
         return "Vacant"
-    cleaned = str(raw).strip().lower()
-    # Try exact match first
-    if cleaned in STATUS_ALIASES:
-        return STATUS_ALIASES[cleaned]
-    # Then try substring match, longest aliases first to avoid partial matches
-    for alias in sorted(STATUS_ALIASES, key=len, reverse=True):
-        if alias in cleaned:
-            return STATUS_ALIASES[alias]
-    # Fallback: return as-is with title case
-    return str(raw).strip()
+    cleaned = str(raw).strip()
+    lower = cleaned.lower()
+
+    # Try AI-provided mapping first (exact match on lowercased key)
+    if ai_status_map:
+        if lower in ai_status_map:
+            return ai_status_map[lower]
+        if cleaned in ai_status_map:
+            return ai_status_map[cleaned]
+
+    # Minimal hardcoded fallback
+    if lower in _BASIC_STATUS_ALIASES:
+        return _BASIC_STATUS_ALIASES[lower]
+
+    # Fallback: return as-is
+    return cleaned
 
 
 def _infer_status(record: dict, section_type: str | None = None) -> str:
@@ -296,30 +354,40 @@ def _get_section_type_for_row(row_idx: int, section_dividers: list[dict]) -> str
     return current_section
 
 
-_FOOTER_MARKERS = {"summary groups", "summary of charges", "totals:"}
+# Minimal hardcoded footer markers (always checked). The AI-provided footer_patterns
+# from identify_columns() supplement these dynamically.
+_FOOTER_MARKERS_FALLBACK = {"grand total", "property total"}
 
 
-def _is_footer_row(ws, row_idx: int) -> bool:
-    """Check if a row matches known footer/summary markers."""
+def _is_footer_row(ws, row_idx: int, ai_footer_patterns: list[str] | None = None) -> bool:
+    """Check if a row matches footer/summary patterns (AI-provided + fallback)."""
     row_text = ""
-    for col in range(1, min(ws.max_column + 1, 10)):
+    for col in range(1, min(ws.max_column + 1, 15)):
         v = ws.cell(row=row_idx, column=col).value
         if v is not None:
             row_text += str(v).lower() + " "
-    if "grand total" in row_text or "property total" in row_text:
-        return True
-    for marker in _FOOTER_MARKERS:
+
+    # Check hardcoded fallback
+    for marker in _FOOTER_MARKERS_FALLBACK:
         if marker in row_text:
             return True
+
+    # Check AI-provided patterns
+    if ai_footer_patterns:
+        for pattern in ai_footer_patterns:
+            if pattern.lower() in row_text:
+                return True
+
     return False
 
 
-def _find_data_end(ws, data_start: int, unit_col_idx: int) -> int:
+def _find_data_end(ws, data_start: int, unit_col_idx: int,
+                   ai_footer_patterns: list[str] | None = None) -> int:
     """Scan from data_start to find the last data row (before grand totals/footer)."""
     data_end = data_start
     blank_streak = 0
     for row_idx in range(data_start, ws.max_row + 1):
-        if _is_footer_row(ws, row_idx):
+        if _is_footer_row(ws, row_idx, ai_footer_patterns):
             break
 
         cell_val = ws.cell(row=row_idx, column=unit_col_idx).value
@@ -357,26 +425,31 @@ def _compute_section_ranges(
     return ranges
 
 
-_SECTION_KEYWORDS = {
+# Minimal hardcoded section keywords (fallback). The AI-provided section_keywords
+# from identify_columns() supplement these dynamically.
+_SECTION_KEYWORDS_FALLBACK = {
     "applicants": ["future residents", "applicant"],
-    "current": ["current residents", "current/notice", "notice/vacant"],
+    "current": ["current residents"],
 }
 
 
-def _scan_section_dividers(ws, data_start: int, existing_dividers: list[dict]) -> list[dict]:
+def _scan_section_dividers(
+    ws, data_start: int, existing_dividers: list[dict],
+    ai_section_keywords: dict[str, list[str]] | None = None,
+    ai_footer_patterns: list[str] | None = None,
+) -> list[dict]:
     """Scan the full sheet for section divider rows the LLM may have missed.
 
-    Looks for rows where column A contains known section keywords
-    (e.g. 'Future Residents/Applicants') that weren't in the LLM preview.
-    Stops scanning at footer rows to avoid matching summary table labels.
-    Returns the merged list of dividers (existing + newly found).
+    Uses AI-provided section keywords (with fallback) to find dividers beyond
+    the 50-row preview window. Stops scanning at footer rows.
     """
+    keywords = ai_section_keywords if ai_section_keywords else _SECTION_KEYWORDS_FALLBACK
     known_rows = {d["row"] for d in existing_dividers}
     dividers = list(existing_dividers)
 
     for row_idx in range(data_start, ws.max_row + 1):
         # Stop at footer content — summary tables reuse section labels
-        if _is_footer_row(ws, row_idx):
+        if _is_footer_row(ws, row_idx, ai_footer_patterns):
             break
 
         if row_idx in known_rows:
@@ -387,9 +460,9 @@ def _scan_section_dividers(ws, data_start: int, existing_dividers: list[dict]) -
         text = a_val.strip()
         lower = text.lower()
 
-        # Check against known section keywords
-        for section_type, keywords in _SECTION_KEYWORDS.items():
-            if any(kw in lower for kw in keywords):
+        # Check against section keywords (AI-provided or fallback)
+        for section_type, kw_list in keywords.items():
+            if any(kw in lower for kw in kw_list):
                 dividers.append({
                     "row": row_idx,
                     "text": text,
@@ -399,6 +472,87 @@ def _scan_section_dividers(ws, data_start: int, existing_dividers: list[dict]) -
                 break
 
     return sorted(dividers, key=lambda d: d["row"])
+
+
+def _filter_non_unit_rows(records: list[dict]) -> list[dict]:
+    """Remove parsed rows that are clearly not real units (e.g., summary/legend rows).
+
+    A row is considered non-unit if it has no sqft, no market_rent, no lease_rent,
+    and no tenant_name — i.e., it has no substantive data beyond a unit identifier.
+    """
+    filtered = []
+    for r in records:
+        sqft = r.get("sqft")
+        market = r.get("market_rent")
+        lease = r.get("lease_rent")
+        tenant = r.get("tenant_name")
+        tenant_str = str(tenant).strip() if tenant else ""
+
+        has_data = (
+            (sqft is not None and sqft != 0)
+            or (market is not None and market != 0)
+            or (lease is not None and lease != 0)
+            or (tenant_str != "" and tenant_str.upper() not in ("VACANT", "MODEL", ""))
+        )
+        if has_data:
+            filtered.append(r)
+    return filtered
+
+
+def _resolve_unknown_statuses(client, records: list[dict]) -> list[dict]:
+    """If any records have status values not in the canonical set, ask AI to resolve them."""
+    unknown_statuses = set()
+    for r in records:
+        s = r.get("status", "")
+        if s and s not in VALID_STATUSES:
+            unknown_statuses.add(s)
+
+    if not unknown_statuses:
+        return records
+
+    # Make a targeted AI call for just the unknown values
+    status_list = ", ".join(f'"{s}"' for s in sorted(unknown_statuses))
+    prompt = f"""Map each of these rent roll status values to one of the canonical statuses.
+
+Status values to map: [{status_list}]
+
+Canonical statuses: "Occupied", "Vacant", "Applicant", "Occupied-NTV", "Pending Renewal", "Model"
+
+Return ONLY valid JSON (no markdown fences): {{"<raw>": "<canonical>", ...}}"""
+
+    try:
+        response = client.messages.create(
+            model="claude-sonnet-4-20250514",
+            max_tokens=1024,
+            messages=[{"role": "user", "content": prompt}],
+        )
+        text = "".join(b.text for b in response.content if hasattr(b, "text")).strip()
+        text = re.sub(r"^```(?:json)?\s*", "", text)
+        text = re.sub(r"\s*```$", "", text)
+        match = re.search(r"\{", text)
+        if match:
+            text = text[match.start():]
+            depth = 0
+            for i, ch in enumerate(text):
+                if ch == "{":
+                    depth += 1
+                elif ch == "}":
+                    depth -= 1
+                    if depth == 0:
+                        text = text[: i + 1]
+                        break
+        text = re.sub(r",\s*([}\]])", r"\1", text)
+        fix_map = json.loads(text)
+
+        # Apply the fixes
+        for r in records:
+            s = r.get("status", "")
+            if s in fix_map and fix_map[s] in VALID_STATUSES:
+                r["status"] = fix_map[s]
+    except Exception:
+        pass  # If the resolution call fails, leave statuses as-is
+
+    return records
 
 
 def _merge_applicants(records: list[dict]) -> list[dict]:
@@ -437,7 +591,9 @@ def _merge_applicants(records: list[dict]) -> list[dict]:
     return current
 
 
-def _parse_single_row(ws, col_map: dict) -> list[dict]:
+def _parse_single_row(ws, col_map: dict,
+                      ai_status_map: dict[str, str] | None = None,
+                      ai_footer_patterns: list[str] | None = None) -> list[dict]:
     """Extract records from a single-row-per-unit rent roll."""
     cols = col_map["columns"]
     charge_cols = col_map.get("charge_columns") or {}
@@ -446,7 +602,7 @@ def _parse_single_row(ws, col_map: dict) -> list[dict]:
     section_dividers = col_map.get("section_dividers") or []
     unit_col_idx = _col_index(cols["unit"])
 
-    data_end = _find_data_end(ws, data_start, unit_col_idx)
+    data_end = _find_data_end(ws, data_start, unit_col_idx, ai_footer_patterns)
     col_map["data_end_row"] = data_end
 
     section_ranges = _compute_section_ranges(section_dividers, data_start, data_end)
@@ -454,7 +610,7 @@ def _parse_single_row(ws, col_map: dict) -> list[dict]:
     records = []
     for range_start, range_end, section_type in section_ranges:
         for row_idx in range(range_start, range_end + 1):
-            if _is_footer_row(ws, row_idx):
+            if _is_footer_row(ws, row_idx, ai_footer_patterns):
                 break
 
             unit_val = ws.cell(row=row_idx, column=unit_col_idx).value
@@ -482,7 +638,7 @@ def _parse_single_row(ws, col_map: dict) -> list[dict]:
 
             # Normalize status
             if status_exists and cols.get("status"):
-                record["status"] = normalize_status(record.get("status"))
+                record["status"] = normalize_status(record.get("status"), ai_status_map)
             else:
                 record["status"] = _infer_status(record, section_type)
 
@@ -492,7 +648,8 @@ def _parse_single_row(ws, col_map: dict) -> list[dict]:
     return _merge_applicants(records)
 
 
-def _parse_multi_row(ws, col_map: dict) -> list[dict]:
+def _parse_multi_row(ws, col_map: dict,
+                     ai_footer_patterns: list[str] | None = None) -> list[dict]:
     """Extract records from a multi-row-per-unit rent roll.
 
     Each unit spans multiple rows: a header row (with unit info), charge detail
@@ -518,7 +675,7 @@ def _parse_multi_row(ws, col_map: dict) -> list[dict]:
     last_non_blank = data_start
     blank_streak = 0
     for row_idx in range(data_start, ws.max_row + 1):
-        if _is_footer_row(ws, row_idx):
+        if _is_footer_row(ws, row_idx, ai_footer_patterns):
             break
 
         has_content = any(
@@ -577,7 +734,7 @@ def _parse_multi_row(ws, col_map: dict) -> list[dict]:
         _finalize_unit(section_type)
 
         for row_idx in range(range_start, range_end + 1):
-            if _is_footer_row(ws, row_idx):
+            if _is_footer_row(ws, row_idx, ai_footer_patterns):
                 break
 
             # Check if this is a blank separator row
@@ -670,16 +827,31 @@ def parse_rent_roll(client, file_bytes: bytes, filename: str) -> dict:
     col_map.setdefault("multi_row_config", None)
     col_map.setdefault("section_dividers", [])
 
+    # Extract AI-provided detection hints
+    ai_status_map = {k.lower(): v for k, v in col_map.pop("status_mapping", {}).items()}
+    ai_footer_patterns = col_map.pop("footer_patterns", [])
+    ai_section_keywords = col_map.pop("section_keywords", None)
+    # Treat empty dict as None for section keywords
+    if not ai_section_keywords:
+        ai_section_keywords = None
+
     # Scan full sheet for section dividers the LLM may have missed
     col_map["section_dividers"] = _scan_section_dividers(
-        ws, col_map["data_start_row"], col_map["section_dividers"]
+        ws, col_map["data_start_row"], col_map["section_dividers"],
+        ai_section_keywords, ai_footer_patterns,
     )
 
     # Branch on format
     if col_map.get("format") == "multi_row":
-        records = _parse_multi_row(ws, col_map)
+        records = _parse_multi_row(ws, col_map, ai_footer_patterns)
     else:
-        records = _parse_single_row(ws, col_map)
+        records = _parse_single_row(ws, col_map, ai_status_map, ai_footer_patterns)
+
+    # Resolve any status values the AI mapping didn't cover
+    records = _resolve_unknown_statuses(client, records)
+
+    # Filter out non-unit rows (summary/legend data that slipped through footer detection)
+    records = _filter_non_unit_rows(records)
 
     df = pd.DataFrame(records)
 

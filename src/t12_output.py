@@ -153,7 +153,7 @@ def _write_mapping_sheet(wb, parse_result: T12ParseResult, mapping: list[dict]):
 # Sheet 3: T12 Summary
 # ---------------------------------------------------------------------------
 
-def _write_summary_sheet(wb, mapping_count: int, unit_count: int | None, total_sf: float | None):
+def _write_summary_sheet(wb, mapping_count: int, unit_count: int | None, total_sf: float | None, expenses_positive: bool = True):
     """Write the T12 Summary sheet with SUMIFS formulas."""
     ws = wb.create_sheet("T12 Summary")
 
@@ -336,9 +336,10 @@ def _write_summary_sheet(wb, mapping_count: int, unit_count: int | None, total_s
     # ===== NOI =====
     egi_row = row_map["_egi"]
     opex_row = row_map["_total_opex"]
+    noi_op = "-" if expenses_positive else "+"
     _write_total_row(
         "Net Operating Income",
-        f"=E{egi_row}+E{opex_row}",
+        f"=E{egi_row}{noi_op}E{opex_row}",
         current_row,
         key="_noi",
     )
@@ -367,7 +368,7 @@ def _write_summary_sheet(wb, mapping_count: int, unit_count: int | None, total_s
     btl_row = row_map["_total_btl"]
     _write_total_row(
         "Cash Flow After BTL",
-        f"=E{noi_row}+E{btl_row}",
+        f"=E{noi_row}{noi_op}E{btl_row}",
         current_row,
         key="_cash_flow",
     )
@@ -489,6 +490,12 @@ def generate_t12_output(
     if "Sheet" in wb.sheetnames:
         del wb["Sheet"]
 
+    # Detect sign convention: are expenses stored as positive or negative?
+    expenses_positive = True
+    gt = parse_result.grand_totals
+    if gt.get("total_opex") and gt["total_opex"].total_value is not None:
+        expenses_positive = gt["total_opex"].total_value > 0
+
     # Sheet 1: Raw Data
     _write_raw_data_sheet(wb, raw_wb_bytes, parse_result.sheet_name)
 
@@ -496,7 +503,7 @@ def generate_t12_output(
     _, mapping_count = _write_mapping_sheet(wb, parse_result, mapping)
 
     # Sheet 3: T12 Summary
-    _, row_map = _write_summary_sheet(wb, mapping_count, unit_count, total_sf)
+    _, row_map = _write_summary_sheet(wb, mapping_count, unit_count, total_sf, expenses_positive)
 
     # Sheet 4: Checks
     _write_checks_sheet(wb, row_map, parse_result)
